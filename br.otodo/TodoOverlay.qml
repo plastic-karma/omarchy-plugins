@@ -15,10 +15,12 @@ Item {
 
   property bool opened: false
   property string stage: "text"
+  property bool dateInputReady: false
   property string taskText: ""
   property string errorText: ""
   property string submittedText: ""
   property string submittedDate: ""
+  property var detectedDueDatePhrase: null
   property date todayDate: new Date()
   property date selectedDate: new Date()
   property int viewYear: selectedDate.getFullYear()
@@ -45,7 +47,9 @@ Item {
   readonly property string pluginDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string helperPath: pluginDir ? pluginDir + "/bin/otodo-create" : ""
   readonly property int cardWidth: Math.min(Style.space(540), panel.width - Style.gapsOut * 2)
-  readonly property int desiredCardHeight: stage === "text" ? Style.space(220) : Style.space(600)
+  readonly property int desiredCardHeight: stage === "text"
+    ? Style.space(detectedDueDatePhrase ? 260 : 220)
+    : Style.space(600)
   readonly property int cardHeight: Math.min(desiredCardHeight, panel.height - Style.gapsOut * 2)
 
   function open(payloadJson) {
@@ -62,9 +66,11 @@ Item {
     root.viewMonth = root.selectedDate.getMonth()
     root.taskText = payload.text ? String(payload.text) : ""
     root.errorText = ""
+    root.dateInputReady = false
     root.stage = "text"
     root.opened = true
     taskField.text = root.taskText
+    root.updateDueDateDetection(taskField.text)
 
     Qt.callLater(function() {
       taskField.cursorPosition = taskField.text.length
@@ -88,20 +94,35 @@ Item {
     else root.open("{}")
   }
 
+  function updateDueDateDetection(value) {
+    root.taskText = String(value || "")
+    root.detectedDueDatePhrase = TodoModel.detectDueDatePhrase(root.taskText, root.todayDate)
+    if (root.errorText) root.errorText = ""
+  }
+
   function showDatePicker() {
-    var trimmed = taskField.text.trim()
-    if (!trimmed) {
-      root.errorText = "Enter a todo first."
+    var detection = root.detectedDueDatePhrase
+    var savedName = detection ? detection.nameWithoutPhrase : taskField.text.trim()
+    if (!savedName.trim()) {
+      root.errorText = detection ? "Add a name besides the due date." : "Enter a todo first."
       return
     }
 
-    root.taskText = trimmed
+    if (detection) {
+      var detectedDate = TodoModel.parseDateKey(detection.dueDate)
+      if (detectedDate) root.selectDate(detectedDate)
+    }
+
+    root.taskText = savedName.trim()
     root.errorText = ""
+    root.dateInputReady = false
     root.stage = "date"
-    Qt.callLater(function() { dateKeyCatcher.forceActiveFocus() })
+    dateInputTimer.restart()
   }
 
   function returnToText() {
+    root.dateInputReady = false
+    dateInputTimer.stop()
     root.stage = "text"
     root.errorText = ""
     Qt.callLater(function() {
@@ -142,6 +163,17 @@ Item {
 
   function chooseTomorrow() {
     root.selectDate(TodoModel.addDays(root.todayDate, 1))
+  }
+
+  Timer {
+    id: dateInputTimer
+    interval: 150
+    repeat: false
+    onTriggered: {
+      if (root.stage !== "date") return
+      root.dateInputReady = true
+      dateKeyCatcher.forceActiveFocus()
+    }
   }
 
   function weekdayLabel(day) {
@@ -267,7 +299,7 @@ Item {
           font.family: root.fontFamily
           placeholderText: "Enter a todo"
           maximumLength: 500
-          onTextChanged: root.taskText = text
+          onTextChanged: root.updateDueDateDetection(text)
           onAccepted: root.showDatePicker()
 
           Keys.onPressed: function(event) {
@@ -279,9 +311,21 @@ Item {
         }
 
         Text {
+          visible: root.detectedDueDatePhrase !== null
+          width: parent.width
+          text: visible
+            ? "Due " + root.detectedDueDatePhrase.dueDate
+              + "  ·  “" + root.detectedDueDatePhrase.phrase + "” will be removed when added"
+            : ""
+          color: root.accent
+          wrapMode: Text.Wrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
           visible: root.errorText !== ""
           width: parent.width
-          height: visible ? implicitHeight : 0
           text: root.errorText
           color: Color.urgent
           wrapMode: Text.Wrap
@@ -291,7 +335,9 @@ Item {
 
         Text {
           width: parent.width
-          text: "Enter to choose a date  ·  Esc to cancel"
+          text: root.detectedDueDatePhrase
+            ? "Enter to review the detected date  ·  Esc to cancel"
+            : "Enter to choose a date  ·  Esc to cancel"
           color: Qt.darker(root.foreground, 1.6)
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -315,7 +361,7 @@ Item {
           focus: root.stage === "date"
 
           Keys.onPressed: function(event) {
-            if (root.stage !== "date") return
+            if (root.stage !== "date" || !root.dateInputReady) return
 
             if (event.key === Qt.Key_Escape) {
               root.returnToText()
