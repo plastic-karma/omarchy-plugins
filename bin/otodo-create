@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_file="${OTODO_OMARCHY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/otodo.json}"
+
+die() {
+  printf 'otodo-create: %s\n' "$*" >&2
+  exit 1
+}
+
+store_root() {
+  local configured="~/obs/default/todos"
+
+  if [[ -f "$config_file" ]]; then
+    configured="$(jq -er '.storeRoot | strings | select(length > 0)' "$config_file")" \
+      || die "invalid storeRoot in $config_file"
+  fi
+
+  [[ "$configured" != *$'\n'* && "$configured" != *$'\r'* ]] \
+    || die "storeRoot must be a single-line path"
+
+  case "$configured" in
+    "~") configured="$HOME" ;;
+    "~/"*) configured="$HOME/${configured:2}" ;;
+  esac
+
+  [[ "$configured" = /* ]] || die "storeRoot must be absolute or start with ~/"
+  printf '%s\n' "$configured"
+}
+
+otodo_binary() {
+  if [[ -n "${OTODO_BIN:-}" ]]; then
+    [[ "$OTODO_BIN" = /* && -x "$OTODO_BIN" ]] \
+      || die "OTODO_BIN must name an executable absolute path"
+    printf '%s\n' "$OTODO_BIN"
+    return
+  fi
+
+  if command -v otodo >/dev/null 2>&1; then
+    command -v otodo
+    return
+  fi
+
+  if [[ -x "$HOME/.cargo/bin/otodo" ]]; then
+    printf '%s\n' "$HOME/.cargo/bin/otodo"
+    return
+  fi
+
+  die "otodo is not installed or available on PATH"
+}
+
+usage() {
+  die "usage: otodo-create --check | --add <text> <YYYY-MM-DD>"
+}
+
+case "${1:-}" in
+  --check)
+    [[ $# -eq 1 ]] || usage
+    root="$(store_root)"
+    cli="$(otodo_binary)"
+    exec "$cli" --root "$root" --format json root
+    ;;
+  --add)
+    [[ $# -eq 3 ]] || usage
+    name="$2"
+    due_date="$3"
+    [[ "$name" =~ [^[:space:]] ]] || die "todo text cannot be empty"
+    [[ "$name" != *$'\n'* && "$name" != *$'\r'* ]] || die "todo text must be one line"
+    [[ "$due_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+      || die "date must use YYYY-MM-DD"
+
+    root="$(store_root)"
+    cli="$(otodo_binary)"
+    exec "$cli" --root "$root" --format json add "$name" --due-date "$due_date"
+    ;;
+  *)
+    usage
+    ;;
+esac

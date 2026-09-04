@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "br.otodo",
+  "name": "OTodo Quick Add",
+  "version": "1.0.0",
+  "author": "br",
+  "description": "Create dated Obsidian Todo tasks from an Omarchy overlay",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "TodoOverlay.qml"
+  }
+}
