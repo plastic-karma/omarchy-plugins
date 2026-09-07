@@ -50,10 +50,35 @@ otodo_binary() {
 }
 
 usage() {
-  die "usage: otodo-create --check | --add <text> <YYYY-MM-DD>"
+  die "usage: otodo-create --check | --capabilities | --parents <query> | --parent <full-id> | --add <text> <YYYY-MM-DD> [--parent <full-id>] [--attach <file>]..."
+}
+
+parent_id() {
+  local value="$1" LC_ALL=C
+  [[ "$value" =~ ^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$ ]] \
+    || die "parent must be a full ULID"
+  printf '%s\n' "${value^^}"
 }
 
 case "${1:-}" in
+  --capabilities)
+    [[ $# -eq 1 ]] || usage
+    cli="$(otodo_binary)"
+    exec "$cli" --format json capabilities
+    ;;
+  --parents)
+    [[ $# -eq 2 ]] || usage
+    root="$(store_root)"
+    cli="$(otodo_binary)"
+    exec "$cli" --root "$root" --format json list --all --summary "--query=$2" --limit 25
+    ;;
+  --parent)
+    [[ $# -eq 2 ]] || usage
+    parent="$(parent_id "$2")"
+    root="$(store_root)"
+    cli="$(otodo_binary)"
+    exec "$cli" --root "$root" --format json show "$parent"
+    ;;
   --check)
     [[ $# -eq 1 ]] || usage
     root="$(store_root)"
@@ -61,9 +86,30 @@ case "${1:-}" in
     exec "$cli" --root "$root" --format json root
     ;;
   --add)
-    [[ $# -eq 3 ]] || usage
+    [[ $# -ge 3 ]] || usage
     name="$2"
     due_date="$3"
+    shift 3
+    mutation_args=()
+    has_parent=false
+    while [[ $# -gt 0 ]]; do
+      [[ $# -ge 2 ]] || usage
+      case "$1" in
+        --parent)
+          [[ "$has_parent" = false ]] || usage
+          parent="$(parent_id "$2")"
+          mutation_args+=(--parent "$parent")
+          has_parent=true
+          ;;
+        --attach)
+          [[ -n "$2" ]] || die "attachment path cannot be empty"
+          # One array entry preserves literal shell characters and option-like names.
+          mutation_args+=("--attach=$2")
+          ;;
+        *) usage ;;
+      esac
+      shift 2
+    done
     [[ "$name" =~ [^[:space:]] ]] || die "todo text cannot be empty"
     [[ "$name" != *$'\n'* && "$name" != *$'\r'* ]] || die "todo text must be one line"
     [[ "$due_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
@@ -71,7 +117,7 @@ case "${1:-}" in
 
     root="$(store_root)"
     cli="$(otodo_binary)"
-    exec "$cli" --root "$root" --format json add "$name" --due-date "$due_date"
+    exec "$cli" --root "$root" --format json add --due-date "$due_date" "${mutation_args[@]}" -- "$name"
     ;;
   *)
     usage

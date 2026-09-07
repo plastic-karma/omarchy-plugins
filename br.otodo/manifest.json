@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "br.otodo",
   "name": "OTodo Quick Add",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "author": "br",
-  "description": "Create dated Obsidian Todo tasks from an Omarchy overlay",
+  "description": "Create dated Obsidian Todo tasks with attachments and searchable parent selection",
   "kinds": [
     "overlay"
   ],
