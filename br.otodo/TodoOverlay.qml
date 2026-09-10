@@ -16,11 +16,10 @@ Item {
 
   property bool opened: false
   property string stage: "text"
-  property bool dateInputReady: false
-  property string taskText: ""
   property string errorText: ""
-  property string submittedText: ""
-  property string submittedDate: ""
+  property var submittedInput: null
+  property string submittedLine: ""
+  property string submittedKind: ""
   property string submittedParentId: ""
   property var submittedAttachments: []
   property var attachmentSelections: []
@@ -52,17 +51,30 @@ Item {
   property bool candidatesLoading: false
   property int parentIndex: -1
   property string searchQuery: ""
-  property string detectedDateAppliedFor: ""
   readonly property bool parentReady: !invalidParentIntent && (!parentId || selectedParent !== null)
   readonly property string parentSummary: invalidParentIntent ? "Invalid launch parent — choose a parent or None."
     : selectedParent ? selectedParent.name + "\n" + selectedParent.id + " · " + selectedParent.state
     : parentId ? parentId + " · " + (parentError ? "Unresolved" : "Resolving…")
     : "None — create a root task"
-  property var detectedDueDatePhrase: null
-  property date todayDate: new Date()
-  property date selectedDate: new Date()
-  property int viewYear: selectedDate.getFullYear()
-  property int viewMonth: selectedDate.getMonth()
+  property string defaultDueDate: ""
+  property var parsedInput: null
+  property var catalog: ({projects: [], tags: [], states: [], default_state: ""})
+  property string catalogError: ""
+  property bool catalogPending: false
+  property int catalogSession: 0
+  property bool catalogReloadQueued: false
+  property var completions: []
+  property int completionIndex: 0
+  property var historyEntries: []
+  property int historyIndex: -1
+  property string historyDraft: ""
+  property int historyCursor: 0
+  property var queuedDrafts: []
+  property int savedCount: 0
+  property string feedbackText: ""
+  property var resultTasks: []
+  property bool showResults: false
+  property bool showHelp: false
 
   property string fontFamily: Style.font.menuFamily
   property color background: Color.menu.background
@@ -73,21 +85,12 @@ Item {
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
   readonly property int cornerRadius: Style.cornerRadius
   readonly property int contentMargin: Style.spacing.panelPadding
-  readonly property int calendarGap: Style.space(4)
-  readonly property int calendarCellHeight: Style.space(38)
-  readonly property real calendarCellWidth: Math.floor((datePane.width - calendarGap * 6) / 7)
-  readonly property string todayKey: TodoModel.keyForDate(todayDate)
-  readonly property string selectedKey: TodoModel.keyForDate(selectedDate)
-  readonly property date viewDate: TodoModel.dateAtNoon(viewYear, viewMonth, 1)
-  readonly property int weekStart: TodoModel.normalizedWeekStart(Qt.locale().firstDayOfWeek)
-  readonly property var weekdays: TodoModel.weekdayOrder(weekStart)
-  readonly property var calendarCells: TodoModel.monthCells(viewYear, viewMonth, weekStart, todayKey)
   readonly property string pluginDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string helperPath: pluginDir ? pluginDir + "/bin/otodo-create" : ""
-  readonly property int cardWidth: Math.min(Style.space(540), panel.width - Style.gapsOut * 2)
-  readonly property int desiredCardHeight: stage === "text"
-    ? Style.space(510)
-    : stage === "parent" || stage === "attachments" ? Style.space(640) : Style.space(760)
+  readonly property int cardWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2)
+  readonly property int desiredCardHeight: root.stage === "text"
+    ? Math.max(Style.space(170), textPane.height + root.contentMargin * 2)
+    : Style.space(640)
   readonly property int cardHeight: Math.min(desiredCardHeight, panel.height - Style.gapsOut * 2)
 
   function focusStage() {
@@ -110,8 +113,6 @@ Item {
     root.requestGeneration++
     root.pendingRead = null
     parentSearchTimer.stop()
-    dateInputTimer.stop()
-    root.dateInputReady = false
     if (readProcess.running) readProcess.running = false
   }
 
@@ -137,11 +138,19 @@ Item {
     root.parentIndex = -1
     root.searchQuery = ""
     root.pickerReturnStage = "text"
-    root.submittedText = ""
-    root.submittedDate = ""
     root.submittedParentId = ""
     root.mutationUncertain = false
-    root.detectedDateAppliedFor = ""
+    root.defaultDueDate = ""
+    root.parsedInput = null
+    root.historyEntries = []
+    root.historyIndex = -1
+    root.queuedDrafts = []
+    root.savedCount = 0
+    root.feedbackText = ""
+    root.resultTasks = []
+    root.showResults = false
+    root.showHelp = false
+    root.catalog = {projects: [], tags: [], states: [], default_state: ""}
     var payload
     var launchError = ""
     try {
@@ -159,22 +168,18 @@ Item {
       root.invalidParentIntent = true
       launchError = String(error.message || error)
     }
-    var now = new Date()
-    root.todayDate = TodoModel.dateAtNoon(now.getFullYear(), now.getMonth(), now.getDate())
-    root.selectedDate = TodoModel.parseDateKey(payload.dueDate) || root.todayDate
-    root.viewYear = root.selectedDate.getFullYear()
-    root.viewMonth = root.selectedDate.getMonth()
-    root.taskText = payload.text
+    root.defaultDueDate = payload.dueDate
     root.parentId = payload.parentId
     root.stage = "text"
     root.opened = true
     contentScroll.contentY = 0
-    taskField.text = root.taskText
-    root.updateDueDateDetection(taskField.text)
+    taskField.text = payload.text
+    root.updateInput(taskField.text)
     root.errorText = ""
     root.parentError = launchError
     root.focusStage()
     root.requestParentRead(root.parentId ? "lookup" : "discover", root.parentId)
+    root.reloadCatalog()
   }
 
   function close() {
@@ -205,11 +210,9 @@ Item {
   }
 
   function openParentPicker() {
-    if (root.mutationPending || (root.stage !== "text" && root.stage !== "date")) return
+    if (root.mutationPending || root.stage !== "text") return
     root.pickerReturnStage = root.stage
     root.stage = "parent"
-    root.dateInputReady = false
-    dateInputTimer.stop()
     contentScroll.contentY = 0
     root.searchQuery = ""
     parentSearch.text = ""
@@ -222,11 +225,9 @@ Item {
 
   function openAttachmentPicker() {
     if (!root.supportsAttachments || root.mutationPending || root.mutationUncertain
-        || (root.stage !== "text" && root.stage !== "date" && root.stage !== "parent")) return
+        || (root.stage !== "text" && root.stage !== "parent")) return
     root.attachmentReturnStage = root.stage
     root.stage = "attachments"
-    root.dateInputReady = false
-    dateInputTimer.stop()
     contentScroll.contentY = 0
     root.attachmentError = ""
     root.focusStage()
@@ -235,8 +236,7 @@ Item {
   function leaveAttachmentPicker() {
     root.stage = root.attachmentReturnStage
     contentScroll.contentY = 0
-    if (root.stage === "date") root.armDateInput()
-    else root.focusStage()
+    root.focusStage()
     // A debounced parent search can expire while the file browser is open.
     if (root.stage === "parent") root.requestParentRead("search", root.searchQuery)
   }
@@ -296,8 +296,7 @@ Item {
     root.candidatesLoading = false
     root.stage = root.pickerReturnStage
     contentScroll.contentY = 0
-    if (root.stage === "date") root.armDateInput()
-    else root.focusStage()
+    root.focusStage()
     // A cancelled picker must not abandon an unresolved launch intent.
     if (root.parentId && !root.selectedParent && !root.parentError)
       root.requestParentRead("lookup", root.parentId)
@@ -471,124 +470,209 @@ Item {
     }
   }
 
-  function updateDueDateDetection(value) {
-    root.taskText = String(value || "")
-    root.detectedDueDatePhrase = TodoModel.detectDueDatePhrase(root.taskText, root.todayDate)
-    if (root.errorText && !root.mutationUncertain) root.errorText = ""
+  function updateCompletions() {
+    root.completions = TodoModel.completeInput(taskField.text, taskField.cursorPosition, root.catalog)
+    root.completionIndex = 0
   }
 
-  function showDatePicker() {
-    if (!root.opened || root.stage !== "text" || root.mutationPending) return
-    var detection = root.detectedDueDatePhrase
-    var savedName = detection ? detection.nameWithoutPhrase : taskField.text.trim()
-    if (!savedName.trim()) {
-      root.errorText = detection ? "Add a name besides the due date." : "Enter a todo first."
+  function updateInput(value) {
+    root.parsedInput = null
+    if (value.trim()) {
+      try { root.parsedInput = TodoModel.parseInput(value, new Date(), root.defaultDueDate) }
+      catch (ignored) {} // Incomplete input remains editable; Enter reports the error.
+    }
+    if (!root.mutationUncertain) root.errorText = ""
+    root.updateCompletions()
+  }
+
+  function inputSummary() {
+    var input = root.parsedInput
+    if (!input || input.kind !== "task") return ""
+    var parts = input.projects.map(function(value) { return "#" + value })
+      .concat(input.tags.map(function(value) { return "@" + value }))
+    if (input.state || root.catalog.default_state) parts.push("!" + (input.state || root.catalog.default_state))
+    if (input.dueDate) parts.push(input.dueDate + (input.dueTime ? " " + input.dueTime : ""))
+    else parts.push("No due date")
+    if (input.url) parts.push(input.url)
+    return input.name + "  ·  " + parts.join("  ")
+  }
+
+  function reloadCatalog() {
+    if (!root.opened || !root.helperPath) return
+    if (root.catalogPending) {
+      root.catalogReloadQueued = true
       return
     }
+    root.catalogPending = true
+    root.catalogSession = root.sessionGeneration
+    root.catalogError = ""
+    catalogProcess.command = [root.helperPath, "--catalog"]
+    catalogProcess.running = true
+    catalogStartTimer.restart()
+  }
 
-    if (detection && root.detectedDateAppliedFor !== taskField.text) {
-      var detectedDate = TodoModel.parseDateKey(detection.dueDate)
-      if (detectedDate) root.selectDate(detectedDate)
-      root.detectedDateAppliedFor = taskField.text
+  function finishCatalog(exitCode, failure) {
+    if (!root.catalogPending) return
+    root.catalogPending = false
+    catalogStartTimer.stop()
+    if (root.opened && root.catalogSession === root.sessionGeneration) {
+      try {
+        if (failure || exitCode !== 0)
+          throw new Error(failure || TodoModel.decodeError(catalogStderr.text))
+        root.catalog = TodoModel.decodeCatalog(catalogStdout.text)
+      } catch (error) { root.catalogError = String(error.message || error) }
+      root.updateCompletions()
     }
-
-    root.taskText = savedName.trim()
-    if (!root.mutationUncertain) root.errorText = ""
-    root.stage = "date"
-    contentScroll.contentY = 0
-    root.armDateInput()
-  }
-
-  function returnToText() {
-    root.dateInputReady = false
-    dateInputTimer.stop()
-    root.stage = "text"
-    if (!root.mutationUncertain) root.errorText = ""
-    contentScroll.contentY = 0
-    root.focusStage()
-  }
-
-  function selectDate(date) {
-    root.selectedDate = TodoModel.dateAtNoon(date.getFullYear(), date.getMonth(), date.getDate())
-    root.viewYear = root.selectedDate.getFullYear()
-    root.viewMonth = root.selectedDate.getMonth()
-  }
-
-  function selectCell(cell) {
-    root.selectDate(TodoModel.dateAtNoon(cell.year, cell.month, cell.day))
-    dateKeyCatcher.forceActiveFocus()
-  }
-
-  function moveSelection(days) {
-    root.selectDate(TodoModel.addDays(root.selectedDate, days))
-  }
-
-  function moveSelectionMonth(months) {
-    root.selectDate(TodoModel.addMonths(root.selectedDate, months))
-  }
-
-  function moveViewMonth(months) {
-    var next = TodoModel.dateAtNoon(root.viewYear, root.viewMonth + months, 1)
-    root.viewYear = next.getFullYear()
-    root.viewMonth = next.getMonth()
-    dateKeyCatcher.forceActiveFocus()
-  }
-
-  function chooseToday() {
-    root.selectDate(root.todayDate)
-  }
-
-  function chooseTomorrow() {
-    root.selectDate(TodoModel.addDays(root.todayDate, 1))
-  }
-
-  function armDateInput() {
-    root.dateInputReady = false
-    dateInputTimer.restart()
+    if (root.catalogReloadQueued) {
+      root.catalogReloadQueued = false
+      Qt.callLater(root.reloadCatalog)
+    }
   }
 
   Timer {
-    id: dateInputTimer
-    interval: 150
-    repeat: false
-    onTriggered: {
-      if (!root.opened || root.stage !== "date") return
-      root.dateInputReady = true
-      dateKeyCatcher.forceActiveFocus()
+    id: catalogStartTimer
+    interval: 1000
+    onTriggered: if (root.catalogPending && !catalogProcess.running)
+      root.finishCatalog(-1, "Could not load suggestions. Check the todo helper, then press F5.")
+  }
+
+  Process {
+    id: catalogProcess
+    command: []
+    stdout: StdioCollector { id: catalogStdout; waitForEnd: true }
+    stderr: StdioCollector { id: catalogStderr; waitForEnd: true }
+    onStarted: catalogStartTimer.stop()
+    onExited: function(exitCode) { root.finishCatalog(exitCode, "") }
+    onRunningChanged: if (!running) Qt.callLater(function() {
+      if (root.catalogPending && !catalogProcess.running)
+        root.finishCatalog(-1, "Suggestion lookup stopped without a result. Press F5 to reload.")
+    })
+  }
+
+  function acceptCompletion(index) {
+    if (root.mutationPending || index < 0 || index >= root.completions.length) return
+    var completion = root.completions[index]
+    var suffix = taskField.text.slice(completion.end)
+    var replacement = completion.value + (suffix && /^\s/.test(suffix) ? "" : " ")
+    taskField.text = taskField.text.slice(0, completion.start) + replacement + suffix
+    taskField.cursorPosition = completion.start + replacement.length
+    taskField.forceActiveFocus()
+  }
+
+  function moveHistory(delta) {
+    if (!root.historyEntries.length) return
+    if (root.historyIndex < 0) {
+      if (delta > 0) return
+      root.historyDraft = taskField.text
+      root.historyCursor = taskField.cursorPosition
+      root.historyIndex = root.historyEntries.length
+    }
+    var next = Math.max(0, Math.min(root.historyEntries.length, root.historyIndex + delta))
+    if (next === root.historyEntries.length) {
+      root.historyIndex = -1
+      taskField.text = root.historyDraft
+      taskField.cursorPosition = root.historyCursor
+    } else {
+      root.historyIndex = next
+      taskField.text = root.historyEntries[next]
+      taskField.cursorPosition = taskField.text.length
     }
   }
 
-  function weekdayLabel(day) {
-    return String(Qt.locale().dayName(day, Locale.ShortFormat)).slice(0, 2).toUpperCase()
+  function pasteInput() {
+    pasteBuffer.clear()
+    pasteBuffer.paste()
+    var value = pasteBuffer.text.replace(/\r\n?/g, "\n").replace(/\t/g, " ")
+    if (!value) return
+    var start = taskField.selectionStart
+    var end = taskField.selectionEnd
+    var combined = taskField.text.slice(0, start) + value + taskField.text.slice(end)
+    if (/[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]/.test(value)
+        || unescape(encodeURIComponent(combined)).length > 16384) {
+      root.errorText = "Paste must be at most 16 KiB including the draft, without control characters."
+      return
+    }
+    var lines = combined.split("\n").filter(function(line) { return line.trim() !== "" })
+    if (!lines.length) return
+    taskField.text = lines.shift()
+    taskField.cursorPosition = value.indexOf("\n") >= 0 ? taskField.text.length : start + value.length
+    root.queuedDrafts = root.queuedDrafts.concat(lines)
   }
 
-  function saveTodo() {
-    if (!root.opened || root.stage !== "date" || !root.dateInputReady
-        || root.mutationPending || root.mutationUncertain) return
+  function finishLine() {
+    var line = root.submittedLine.trim()
+    if (line && root.historyEntries[root.historyEntries.length - 1] !== line)
+      root.historyEntries = root.historyEntries.concat([line]).slice(-100)
+    root.historyIndex = -1
+    var drafts = root.queuedDrafts.slice()
+    taskField.text = drafts.length ? drafts.shift() : ""
+    root.queuedDrafts = drafts
+    root.focusStage()
+  }
+
+  function submitLine() {
+    if (!root.opened || root.stage !== "text" || root.mutationPending || root.mutationUncertain) return
+    if (!taskField.text.trim()) {
+      root.submittedLine = ""
+      root.finishLine()
+      return
+    }
+    root.historyIndex = -1
+    var input
+    try { input = TodoModel.parseInput(taskField.text, new Date(), root.defaultDueDate) }
+    catch (error) {
+      root.errorText = String(error.message || error)
+      return
+    }
+    root.submittedLine = taskField.text
+    root.submittedKind = input.kind
+    if (["help", "clear", "quit", "parent", "attach"].indexOf(input.kind) >= 0) {
+      if (input.kind === "quit") { root.dismiss(); return }
+      if (input.kind === "attach" && !root.supportsAttachments) {
+        root.errorText = "Attachment support is unavailable. Check the installed otodo CLI."
+        return
+      }
+      root.showHelp = input.kind === "help"
+      if (input.kind === "clear") {
+        root.resultTasks = []
+        root.showResults = false
+        root.feedbackText = ""
+      }
+      root.finishLine()
+      if (input.kind === "parent") root.openParentPicker()
+      else if (input.kind === "attach") root.openAttachmentPicker()
+      return
+    }
     if (!root.helperPath) {
       root.errorText = "The todo helper is unavailable: plugin source directory is missing."
       return
     }
-    if (!root.parentReady) {
-      root.errorText = "Resolve the requested parent, choose another parent, or explicitly choose None before adding."
-      return
-    }
-    root.submittedText = root.taskText
-    root.submittedDate = root.selectedKey
-    root.submittedParentId = root.parentId
-    if (root.attachmentSelections.length > 0 && !root.supportsAttachments) {
-      root.errorText = "This otodo does not support attachments. Update otodo or remove the selections."
-      return
-    }
-    root.submittedAttachments = root.attachmentSelections.slice()
+    var command
+    if (input.kind === "task") {
+      if (!root.parentReady) {
+        root.errorText = "Resolve the requested parent, choose another parent, or explicitly choose None before adding."
+        return
+      }
+      if (root.attachmentSelections.length && !root.supportsAttachments) {
+        root.errorText = "This otodo does not support attachments. Update otodo or remove the selections."
+        return
+      }
+      root.submittedInput = input
+      root.submittedParentId = root.parentId
+      root.submittedAttachments = root.attachmentSelections.slice()
+      command = [root.helperPath, "--add", input.name, input.dueDate]
+      if (input.dueTime) command.push("--due-time", input.dueTime)
+      if (input.state) command.push("--state", input.state)
+      if (input.url) command.push("--url", input.url)
+      input.projects.forEach(function(value) { command.push("--project", value) })
+      input.tags.forEach(function(value) { command.push("--tag", value) })
+      if (root.submittedParentId) command.push("--parent", root.submittedParentId)
+      root.submittedAttachments.forEach(function(item) { command.push("--attach", item.path) })
+    } else command = [root.helperPath, "--input", input.line]
     root.mutationSession = root.sessionGeneration
     root.mutationPending = true
     root.mutationStarted = false
     root.errorText = ""
-    root.stage = "saving"
-    var command = [root.helperPath, "--add", root.submittedText, root.submittedDate]
-    if (root.submittedParentId) command.push("--parent", root.submittedParentId)
-    root.submittedAttachments.forEach(function(item) { command.push("--attach", item.path) })
     createProcess.command = command
     createProcess.running = true
     createStartTimer.restart()
@@ -598,20 +682,63 @@ Item {
     root.mutationPending = false
     createStartTimer.stop()
     if (!root.opened || root.mutationSession !== root.sessionGeneration) return
-    root.mutationUncertain = uncertain
-    root.errorText = uncertain
-      ? "Creation could not be confirmed. The task may already exist; check the store before adding again. "
-        + "Submitted: " + root.submittedText + " · " + root.submittedDate
-        + " · parent " + (root.submittedParentId || "None")
-        + " · " + root.submittedAttachments.length + " attachment(s). " + message
-      : message
-    root.stage = "date"
-    root.armDateInput()
-    var session = root.sessionGeneration
-    Qt.callLater(function() {
-      if (root.opened && root.sessionGeneration === session && root.stage === "date")
-        root.reveal(dateError)
-    })
+    if (root.submittedKind === "sync") {
+      // The one-shot CLI stops on every sync failure; never replay that line here.
+      root.mutationUncertain = true
+      root.resultTasks = []
+      root.showResults = false
+      root.errorText = "Sync stopped. This session is paused because a failed sync can leave commits or remote changes. "
+        + "Inspect the repository, then close and reopen the prompt before continuing. " + message
+    } else {
+      root.mutationUncertain = root.submittedKind === "task" && uncertain
+      root.errorText = root.mutationUncertain
+        ? "Creation could not be confirmed. The task may already exist; check the store before adding again. "
+          + "Submitted: " + root.submittedLine + " · parent " + (root.submittedParentId || "None")
+          + " · " + root.submittedAttachments.length + " attachment(s). " + message
+        : message
+    }
+    root.focusStage()
+  }
+
+  function finishSubmission(stdout) {
+    if (root.submittedKind === "task") {
+      var task = TodoModel.decodeTask(stdout)
+      var input = root.submittedInput
+      if ((task.parent || "") !== root.submittedParentId || task.name !== input.name
+          || (task.due_date || "") !== input.dueDate || (task.due_time || "") !== input.dueTime
+          || (input.state && task.state !== input.state) || (task.url || "") !== input.url
+          || JSON.stringify(task.projects.slice().sort()) !== JSON.stringify(input.projects.slice().sort())
+          || JSON.stringify(task.tags.slice().sort()) !== JSON.stringify(input.tags.slice().sort()))
+        throw new Error("The returned task does not match the submitted capture.")
+      root.savedCount++
+      root.resultTasks = []
+      root.showResults = false
+      root.feedbackText = "Saved " + task.name + "  ·  !" + task.state
+        + (task.due_date ? "  ·  " + task.due_date + (task.due_time ? " " + task.due_time : "") : "")
+      root.defaultDueDate = ""
+      root.attachmentSelections = []
+      root.parentId = ""
+      root.selectedParent = null
+      root.parentError = ""
+      root.invalidParentIntent = false
+      root.reloadCatalog()
+    } else {
+      var result = TodoModel.decodeInputResult(stdout, root.submittedKind)
+      if (root.submittedKind === "list") {
+        root.resultTasks = result.tasks
+        root.showResults = true
+        root.feedbackText = result.tasks.length + (result.tasks.length === 1 ? " task" : " tasks")
+        resultList.positionViewAtBeginning()
+      } else {
+        root.feedbackText = "Sync complete"
+        root.resultTasks = []
+        root.showResults = false
+        root.reloadCatalog()
+      }
+    }
+    root.showHelp = false
+    root.mutationPending = false
+    root.finishLine()
   }
 
   Timer {
@@ -652,23 +779,13 @@ Item {
         return
       }
       try {
-        var task = TodoModel.decodeTask(createStdout.text)
-        if ((task.parent || "") !== root.submittedParentId || task.name !== root.submittedText
-            || task.due_date !== root.submittedDate)
-          throw new Error("The returned task does not match the submitted title, date, or parent.")
+        if (root.opened && root.mutationSession === root.sessionGeneration)
+          root.finishSubmission(createStdout.text)
       } catch (error) {
         root.mutationFailure(String(error.message || error), true)
         return
       }
       root.mutationPending = false
-      if (!root.opened || root.mutationSession !== root.sessionGeneration) return
-      root.attachmentSelections = []
-      root.dismiss()
-      Quickshell.execDetached([
-        root.omarchyPath + "/bin/omarchy-notification-send",
-        "Todo created",
-        root.submittedText + " · " + root.submittedDate
-      ])
     }
   }
 
@@ -685,38 +802,6 @@ Item {
     Keys.onSpacePressed: function(event) { if (!event.isAutoRepeat) clicked() }
   }
 
-  component ParentControl: Column {
-    required property string actionName
-    spacing: Style.space(5)
-    ActionButton {
-      objectName: parent.actionName
-      width: parent.width
-      text: "Parent…  (Ctrl+P)"
-      Accessible.name: "Choose parent"
-      bordered: true
-      onClicked: root.openParentPicker()
-    }
-    Text {
-      objectName: parent.actionName + "Summary"
-      width: parent.width
-      text: root.parentSummary
-      textFormat: Text.PlainText
-      wrapMode: Text.WrapAnywhere
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    Text {
-      visible: root.parentError !== ""
-      width: parent.width
-      text: root.parentError
-      textFormat: Text.PlainText
-      wrapMode: Text.Wrap
-      color: Color.urgent
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-  }
 
   component AttachmentControl: Column {
     required property string actionName
@@ -860,9 +945,8 @@ Item {
         anchors.margins: root.contentMargin
         clip: true
         contentWidth: width
-        contentHeight: root.stage === "text" ? textPane.height
-          : root.stage === "parent" ? parentPane.height
-          : root.stage === "attachments" ? attachmentPane.height : dateColumn.height
+        contentHeight: root.stage === "parent" ? parentPane.height
+          : root.stage === "attachments" ? attachmentPane.height : textPane.height
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         Keys.onPressed: function(event) {
@@ -874,406 +958,250 @@ Item {
           } else if (event.key === Qt.Key_Escape) {
             if (root.stage === "attachments") root.leaveAttachmentPicker()
             else if (root.stage === "parent") root.leaveParentPicker()
-            else if (root.stage === "date") root.returnToText()
             else root.dismiss()
           } else return
           event.accepted = true
         }
 
+      TextEdit {
+        id: pasteBuffer
+        visible: false
+        textFormat: TextEdit.PlainText
+      }
+
       Column {
         id: textPane
         visible: root.stage === "text"
         width: contentScroll.width
-        spacing: Style.space(12)
+        spacing: Style.space(10)
 
-        Text {
+        Row {
           width: parent.width
-          text: "NEW TODO"
-          color: Qt.darker(root.foreground, 1.4)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          font.letterSpacing: 1
-        }
-
-        Text {
-          width: parent.width
-          text: "What needs doing?"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
-          font.bold: true
-        }
-
-        TextField {
-          id: taskField
-          objectName: "todoTitle"
-          Accessible.name: "Todo title"
-          onActiveFocusChanged: if (activeFocus) root.reveal(this)
-          width: parent.width
-          foreground: root.foreground
-          accent: root.accent
-          font.family: root.fontFamily
-          placeholderText: "Enter a todo"
-          maximumLength: 500
-          onTextChanged: root.updateDueDateDetection(text)
-          onAccepted: root.showDatePicker()
-
-          Keys.onPressed: function(event) {
-            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && event.isAutoRepeat) {
-              event.accepted = true
-              return
-            }
-            if (event.key === Qt.Key_Escape) {
-              root.dismiss()
-              event.accepted = true
-            }
-          }
-        }
-
-        Text {
-          visible: root.detectedDueDatePhrase !== null
-          width: parent.width
-          text: visible
-            // Phrase text is data, not markup.
-            ? "Due " + root.detectedDueDatePhrase.dueDate
-              + "  ·  “" + root.detectedDueDatePhrase.phrase + "” will be removed when added"
-            : ""
-          color: root.accent
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        ParentControl {
-          width: parent.width
-          actionName: "parentTitleButton"
-        }
-
-        AttachmentControl {
-          width: parent.width
-          actionName: "attachmentTitleButton"
-        }
-
-        Text {
-          visible: root.errorText !== ""
-          width: parent.width
-          text: root.errorText
-          textFormat: Text.PlainText
-          color: Color.urgent
-          wrapMode: Text.Wrap
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Text {
-          width: parent.width
-          text: root.detectedDueDatePhrase
-            ? "Enter to review the detected date  ·  Esc to cancel"
-            : "Enter to choose a date  ·  Esc to cancel"
-          color: Qt.darker(root.foreground, 1.6)
-          wrapMode: Text.Wrap
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        ActionButton {
-          objectName: "reviewDateButton"
-          width: parent.width
-          text: "Choose date"
-          onClicked: root.showDatePicker()
-        }
-      }
-
-      Item {
-        id: datePane
-        visible: root.stage === "date" || root.stage === "saving"
-        enabled: root.stage === "date"
-        opacity: root.stage === "saving" ? 0.58 : 1
-        width: contentScroll.width
-        height: dateColumn.height
-
-        Item {
-          id: dateKeyCatcher
-          objectName: "dateKeyboard"
-          Accessible.name: "Choose due date with arrow keys"
-          anchors.fill: parent
-          focus: root.stage === "date"
-
-          Keys.onPressed: function(event) {
-            if (root.stage !== "date" || !root.dateInputReady) return
-            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && event.isAutoRepeat) {
-              event.accepted = true
-              return
-            }
-
-            if (event.key === Qt.Key_Escape) {
-              root.returnToText()
-            } else if (event.key === Qt.Key_Left) {
-              root.moveSelection(-1)
-            } else if (event.key === Qt.Key_Right) {
-              root.moveSelection(1)
-            } else if (event.key === Qt.Key_Up) {
-              root.moveSelection(-7)
-            } else if (event.key === Qt.Key_Down) {
-              root.moveSelection(7)
-            } else if (event.key === Qt.Key_PageUp) {
-              root.moveSelectionMonth(-1)
-            } else if (event.key === Qt.Key_PageDown) {
-              root.moveSelectionMonth(1)
-            } else if (event.key === Qt.Key_Home) {
-              root.chooseToday()
-            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-              root.saveTodo()
-            } else {
-              return
-            }
-            event.accepted = true
-          }
-        }
-        Column {
-          id: dateColumn
-          width: parent.width
-          spacing: Style.space(8)
-
-        Item {
-          width: parent.width
-          height: Style.space(28)
-
           Text {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "REMINDER DATE"
-            color: Qt.darker(root.foreground, 1.4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            font.letterSpacing: 1
-          }
-
-          Text {
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.selectedKey
+            width: parent.width - sessionLabel.implicitWidth
+            text: "otodo"
             color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+          Text {
+            id: sessionLabel
+            text: root.savedCount + " saved" + (root.queuedDrafts.length ? " · " + root.queuedDrafts.length + " queued" : "")
+            color: Qt.darker(root.foreground, 1.5)
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
         }
 
-        Text {
+        ListView {
+          id: resultList
+          objectName: "todoResults"
+          visible: root.showResults && count > 0
           width: parent.width
-          height: Style.space(28)
-          text: root.taskText
-          textFormat: Text.PlainText
-          color: root.foreground
-          elide: Text.ElideRight
-          verticalAlignment: Text.AlignVCenter
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
-          font.bold: true
-        }
-
-        ParentControl {
-          width: parent.width
-          actionName: "parentDateButton"
-        }
-
-        AttachmentControl {
-          width: parent.width
-          actionName: "attachmentDateButton"
-        }
-
-        Item {
-          width: parent.width
-          height: Style.space(38)
-
-          Button {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(42)
-            height: Style.space(34)
-            text: "‹"
-            tooltipText: "Previous month"
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            fontSize: Style.font.heading
-            onClicked: root.moveViewMonth(-1)
-          }
-
-          Text {
-            anchors.centerIn: parent
-            text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
-            color: Qt.darker(root.foreground, 1.3)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-            font.letterSpacing: 1
-          }
-
-          Button {
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(42)
-            height: Style.space(34)
-            text: "›"
-            tooltipText: "Next month"
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            fontSize: Style.font.heading
-            onClicked: root.moveViewMonth(1)
+          height: visible ? Math.min(contentHeight, Style.space(250)) : 0
+          clip: true
+          spacing: Style.space(6)
+          model: root.resultTasks
+          boundsBehavior: Flickable.StopAtBounds
+          delegate: Column {
+            required property var modelData
+            width: resultList.width
+            Text {
+              width: parent.width
+              text: modelData.name
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              text: "!" + modelData.state
+                + (modelData.due_date ? " · " + modelData.due_date + (modelData.due_time ? " " + modelData.due_time : "") : "")
+                + "  " + (modelData.projects || []).map(function(value) { return "#" + value }).join(" ")
+                + "  " + (modelData.tags || []).map(function(value) { return "@" + value }).join(" ")
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Qt.darker(root.foreground, 1.5)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
           }
         }
 
         Row {
           width: parent.width
-          height: Style.space(20)
-          spacing: root.calendarGap
-
-          Repeater {
-            model: root.weekdays
-
-            Text {
-              required property var modelData
-              width: root.calendarCellWidth
-              height: Style.space(20)
-              text: root.weekdayLabel(modelData)
-              color: Qt.darker(root.foreground, 1.6)
-              horizontalAlignment: Text.AlignHCenter
-              verticalAlignment: Text.AlignVCenter
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1
-            }
-          }
-        }
-
-        Grid {
-          width: parent.width
-          height: root.calendarCellHeight * 6 + root.calendarGap * 5
-          columns: 7
-          columnSpacing: root.calendarGap
-          rowSpacing: root.calendarGap
-
-          Repeater {
-            model: root.calendarCells
-
-            Button {
-              required property var modelData
-              width: root.calendarCellWidth
-              height: root.calendarCellHeight
-              text: String(modelData.day)
-              selected: modelData.key === root.selectedKey
-              bordered: modelData.today && !selected
-              foreground: modelData.inMonth ? root.foreground : Qt.darker(root.foreground, 2)
-              accent: root.accent
-              fontFamily: root.fontFamily
-              fontSize: Style.font.body
-              horizontalPadding: 0
-              verticalPadding: 0
-              onClicked: root.selectCell(modelData)
-            }
-          }
-        }
-
-        Column {
-          width: parent.width
-          spacing: Style.space(6)
-
-          Row {
-            spacing: Style.space(6)
-
-            Button {
-              text: "Today"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.chooseToday()
-            }
-
-            Button {
-              text: "Tomorrow"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.chooseTomorrow()
-            }
-          }
-
+          spacing: Style.space(8)
           Text {
-            width: parent.width
-            wrapMode: Text.Wrap
-            text: Qt.formatDate(root.selectedDate, "ddd, MMM d")
-            color: root.foreground
+            id: prompt
+            anchors.verticalCenter: parent.verticalCenter
+            text: "›"
+            color: root.accent
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.heading
+          }
+          TextField {
+            id: taskField
+            objectName: "todoInput"
+            Accessible.name: "Todo or slash command"
+            width: parent.width - prompt.width - parent.spacing
+            foreground: root.foreground
+            accent: root.accent
+            font.family: root.fontFamily
+            placeholderText: "Call plumber tom 9am #personal @chores !open"
+            maximumLength: 16384
+            readOnly: root.mutationPending || root.mutationUncertain
+            onTextChanged: root.updateInput(text)
+            onCursorPositionChanged: root.updateCompletions()
+            onActiveFocusChanged: if (activeFocus) root.reveal(this)
+            Keys.onPressed: function(event) {
+              if (root.mutationPending) { event.accepted = true; return }
+              var control = event.modifiers & Qt.ControlModifier
+              if (event.key === Qt.Key_Escape || (control && event.key === Qt.Key_C)) {
+                root.dismiss()
+              } else if (root.mutationUncertain) return
+              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (!event.isAutoRepeat) root.submitLine()
+              } else if (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier)) {
+                root.acceptCompletion(root.completionIndex)
+              } else if (event.key === Qt.Key_Backtab || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+                if (root.completions.length)
+                  root.completionIndex = (root.completionIndex + 1) % root.completions.length
+              } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+                var delta = event.key === Qt.Key_Up ? -1 : 1
+                if (root.historyIndex >= 0 || !root.completions.length) root.moveHistory(delta)
+                else root.completionIndex = (root.completionIndex + delta + root.completions.length) % root.completions.length
+              } else if (event.key === Qt.Key_F5) {
+                root.reloadCatalog()
+              } else if (control && event.key === Qt.Key_U) {
+                text = ""
+              } else if ((control && event.key === Qt.Key_V)
+                  || (event.key === Qt.Key_Insert && (event.modifiers & Qt.ShiftModifier))) {
+                root.pasteInput()
+              } else if (control && event.key === Qt.Key_D && !text && !root.queuedDrafts.length) {
+                root.dismiss()
+              } else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp) {
+                resultList.contentY = Math.max(0, Math.min(resultList.contentHeight - resultList.height,
+                  resultList.contentY + (event.key === Qt.Key_PageDown ? 1 : -1) * resultList.height))
+              } else return
+              event.accepted = true
+            }
+          }
+        }
+
+        ListView {
+          id: completionList
+          objectName: "todoCompletions"
+          visible: root.completions.length > 0 && !root.mutationPending && !root.mutationUncertain
+          width: parent.width
+          height: visible ? Math.min(contentHeight, Style.space(140)) : 0
+          clip: true
+          model: root.completions
+          currentIndex: root.completionIndex
+          onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+          delegate: ActionButton {
+            required property var modelData
+            required property int index
+            width: completionList.width
+            height: Style.space(28)
+            text: ""
+            selected: root.completionIndex === index
+            Accessible.name: modelData.label
+            Text {
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(10)
+              verticalAlignment: Text.AlignVCenter
+              text: (root.completionIndex === index ? "› " : "  ") + modelData.label
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.completionIndex === index ? root.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            onClicked: root.acceptCompletion(index)
           }
         }
 
         Text {
-          id: dateError
-          objectName: "todoCreateError"
-          visible: root.errorText !== ""
+          objectName: "todoPreview"
+          visible: text !== "" && !root.mutationPending
           width: parent.width
+          text: root.inputSummary()
           textFormat: Text.PlainText
-          text: root.errorText
-          color: Color.urgent
-          wrapMode: Text.Wrap
+          wrapMode: Text.WrapAnywhere
+          color: root.accent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
 
-        Flow {
+        Text {
+          visible: root.parentId !== "" || root.invalidParentIntent
           width: parent.width
-          spacing: Style.space(8)
+          text: "Parent: " + root.parentSummary + (root.parentError ? "\n" + root.parentError : "")
+          textFormat: Text.PlainText
+          wrapMode: Text.WrapAnywhere
+          color: root.parentError ? Color.urgent : root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
 
-          ActionButton {
-            objectName: "backToTitleButton"
-            text: "Back"
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.returnToText()
-          }
+        AttachmentControl {
+          width: parent.width
+          actionName: "attachmentSelections"
+          visible: root.attachmentSelections.length > 0 || root.attachmentError !== ""
+          allowBrowse: false
+        }
 
+        Text {
+          visible: root.showHelp
+          width: parent.width
+          text: "#project  @tag  !state  ·  tom 9am, next week, in 2 hours\n"
+            + "/list [#project @tag !state due:today|tomorrow|overdue|none]\n"
+            + "/sync [ours|theirs]  ·  explicitly synchronize the Git branch\n"
+            + "/parent  /attach  ·  optional parent and files for the next todo\n"
+            + "/clear  /help  /quit\n"
+            + "Tab completes · ↑/↓ suggestions or history · F5 reloads suggestions\n"
+            + "PgUp/PgDn scroll results · Multiline paste queues one draft per Enter"
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
 
-            ActionButton {
-              objectName: "cancelTodoButton"
-              text: "Cancel"
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.dismiss()
-            }
+        Text {
+          objectName: "todoFeedback"
+          visible: text !== ""
+          width: parent.width
+          text: root.mutationPending ? (root.submittedKind === "task" ? "Saving…" : "Running /" + root.submittedKind + "…")
+            : root.errorText || root.feedbackText
+          textFormat: Text.PlainText
+          color: root.errorText ? Color.urgent : root.accent
+          wrapMode: Text.WrapAnywhere
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
 
-            ActionButton {
-              objectName: "addTodoButton"
-              enabled: root.dateInputReady && root.parentReady && !root.mutationUncertain
-              text: root.stage === "saving" ? "Adding…" : "Add todo"
-              selected: true
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.saveTodo()
-            }
+        Text {
+          visible: root.catalogError !== ""
+          width: parent.width
+          text: "Suggestions unavailable · F5 to reload\n" + root.catalogError
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          color: Color.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
         }
 
         Text {
           width: parent.width
-          text: "Arrow keys choose  ·  Page Up/Down changes month  ·  Enter adds"
-          color: Qt.darker(root.foreground, 1.7)
-          horizontalAlignment: Text.AlignHCenter
+          text: "Enter saves · /help commands · Ctrl+P parent · Ctrl+O files · Esc closes"
+          color: Qt.darker(root.foreground, 1.5)
           wrapMode: Text.Wrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-        }
         }
       }
 
@@ -1582,26 +1510,6 @@ Item {
       }
       }
 
-      Rectangle {
-        visible: root.stage === "saving"
-        anchors.centerIn: parent
-        width: savingLabel.implicitWidth + Style.space(28)
-        height: savingLabel.implicitHeight + Style.space(20)
-        radius: root.cornerRadius
-        color: root.background
-        border.width: Style.spacing.hairline
-        border.color: root.border
-
-        Text {
-          id: savingLabel
-          anchors.centerIn: parent
-          text: "Adding todo…"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-        }
-      }
     }
   }
 }

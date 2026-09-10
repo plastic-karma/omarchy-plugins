@@ -20,7 +20,8 @@ try {
   for (const file of ["TodoOverlay.qml", "TodoModel.js"]) {
     let contents = fs.readFileSync(path.join(__dirname, "..", file), "utf8")
     if (file.endsWith(".qml")) contents = contents.replace("visible: root.opened", "visible: false")
-      .replace("id: root", "id: root\n property alias testFiles: attachmentFiles\n property alias testList: attachmentList")
+      .replace("id: root", "id: root\n property alias testFiles: attachmentFiles\n property alias testList: attachmentList\n property alias testInput: taskField\n property string testPaste: \"\"")
+      .replace("pasteBuffer.paste()", "pasteBuffer.text = root.testPaste")
     fs.writeFileSync(path.join(temporary, "plugin", file), contents)
   }
   fs.writeFileSync(path.join(temporary, "shell.qml"), `
@@ -36,7 +37,22 @@ ShellRoot {
     running: true
     onTriggered: {
       try {
-        overlay.open('{"text":"Submit expenses","dueDate":"2026-09-07"}')
+        overlay.open('{}')
+        overlay.testPaste = "\\nFirst queued task\\r\\n\\t\\r\\nSecond queued task"
+        overlay.pasteInput()
+        check(overlay.testInput.text === "First queued task"
+          && overlay.queuedDrafts.length === 1 && overlay.queuedDrafts[0] === "Second queued task",
+          "multiline paste skips empty drafts and never auto-submits")
+        check(!overlay.mutationPending && overlay.savedCount === 0, "paste requires Enter for each save")
+        overlay.testInput.text = "a".repeat(16384)
+        overlay.testInput.cursorPosition = 16384
+        overlay.testPaste = "extra"
+        overlay.pasteInput()
+        check(overlay.testInput.text === "a".repeat(16384) && overlay.errorText !== "",
+          "oversized paste preserves the entire existing draft")
+        overlay.open('{"text":"Submit expenses tom 9am #work @receipts !active","dueDate":"2026-09-07"}')
+        check(overlay.parsedInput.name === "Submit expenses" && overlay.parsedInput.dueTime === "09:00"
+          && overlay.parsedInput.state === "active", "Qt recognizes inline dates and metadata")
         overlay.executableFeatures = ["attachments"]
         overlay.capabilitiesState = "ready"
         check(overlay.supportsAttachments && !overlay.supportsSubtasks && !overlay.supportsTaskCandidates, "independent features")
@@ -46,12 +62,10 @@ ShellRoot {
         check(overlay.attachmentSelections.length === 2, "deduplicate local paths")
         check(!overlay.addAttachmentUrls(["file:///tmp/other.pdf", "https://example.com/file"]), "reject nonlocal drop")
         check(overlay.attachmentSelections.length === 2, "invalid drop changes no selections")
-        overlay.showDatePicker()
-        check(overlay.stage === "date" && overlay.attachmentSelections.length === 2, "date preserves selections")
         overlay.openAttachmentPicker()
-        check(overlay.stage === "attachments", "embedded browser opens from date")
+        check(overlay.stage === "attachments", "embedded browser opens from input")
         overlay.leaveAttachmentPicker()
-        check(overlay.stage === "date" && overlay.attachmentSelections.length === 2, "browser returns to date")
+        check(overlay.stage === "text" && overlay.attachmentSelections.length === 2, "browser returns to input")
         overlay.openParentPicker()
         check(overlay.stage === "parent" && overlay.attachmentSelections.length === 2, "parent preserves selections")
         overlay.openAttachmentPicker()
@@ -62,15 +76,12 @@ ShellRoot {
         check(overlay.stage === "parent", "browser returns to parent")
         check(!overlay.candidatesLoading, "parent lookup does not remain stuck after returning")
         overlay.leaveParentPicker()
-        overlay.returnToText()
         check(overlay.stage === "text" && overlay.attachmentSelections.length === 1, "title preserves selections")
         overlay.mutationUncertain = true
         check(!overlay.addAttachmentUrls(["file:///tmp/blocked.pdf"]), "uncertain result blocks drops")
         overlay.removeAttachment(0)
         check(overlay.attachmentSelections.length === 1, "uncertain result retains selections")
-        overlay.showDatePicker()
-        overlay.dateInputReady = true
-        overlay.saveTodo()
+        overlay.submitLine()
         check(!overlay.mutationPending, "uncertain result blocks retry")
         overlay.close()
         overlay.open('{}')

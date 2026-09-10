@@ -47,11 +47,16 @@ try {
     const schema = fs.readFileSync(schemaPath)
     fs.writeFileSync(config, JSON.stringify({ storeRoot: root }))
     const parent = success(run(helper, ["--add", "Parent", "2026-09-07"])).task
-    const args = ["--add", "--literal $(touch NEVER_CREATED) <expense>", "2026-09-07", "--attach", names[0]]
+    const args = ["--add", "--literal $(touch NEVER_CREATED) <expense>", "", "--state", "active", "--tag", "receipt", "--url", "https://example.com/receipt?x=1&y=2", "--attach", names[0]]
     if (version === 2) args.push("--parent", parent.id)
     args.push("--attach", names[1])
     const created = success(run(helper, args)).task
     assert.equal(created.parent, version === 2 ? parent.id : null)
+    assert.equal(created.due_date, null)
+    assert.equal(created.due_time, null)
+    assert.equal(created.state, "active")
+    assert.deepEqual(created.tags, ["receipt"])
+    assert.equal(created.url, "https://example.com/receipt?x=1&y=2")
     const result = success(run(cli, ["--root", root, "--format", "json", "attachment", "list", created.id]))
     assert.equal(result.version, 1)
     assert.equal(result.attachments.length, 2)
@@ -65,7 +70,7 @@ try {
     assert.deepEqual(fs.readFileSync(metadataPath), metadata)
     assert.deepEqual(fs.readFileSync(schemaPath), schema)
     const before = tasks(root)
-    for (const selection of [["--attach", names[0], "--attach", "missing.pdf"], ["--attach"], ["--attach", ""], ["--parent", parent.id, "--parent", parent.id]]) {
+    for (const selection of [["--attach", names[0], "--attach", "missing.pdf"], ["--attach"], ["--attach", ""], ["--parent", parent.id, "--parent", parent.id], ["--attach", names[0], "--state", "missing"], ["--attach", names[0], "--due-time", "25:00"]]) {
       const failed = run(helper, ["--add", "Must not publish", "2026-09-07", ...selection])
       assert.notEqual(failed.status, 0)
       assert.deepEqual(tasks(root), before)

@@ -54,6 +54,51 @@ for (const decoder of [model.decodeCapabilities, model.decodeCandidates]) {
     assert.throws(() => decoder(malformed), Error)
 }
 
+const catalog = {
+  projects: [{ slug: "work", name: "Work" }], tags: ["Équipe/Été"],
+  states: [{ id: "open", name: "Open", terminal: false }, { id: "done", name: "Done", terminal: true }],
+  default_state: "open"
+}
+const encodeCatalog = value => JSON.stringify({ version: 1, catalog: value })
+assert.deepEqual(model.decodeCatalog(encodeCatalog(catalog)), catalog)
+for (const change of [
+  { projects: [{ slug: "Work", name: "Work" }] }, { projects: [...catalog.projects, ...catalog.projects] },
+  { tags: ["a", "a"] }, { tags: ["bad,tag"] }, { default_state: "missing" }, { default_state: "done" },
+  { states: [...catalog.states, catalog.states[0]] }, { states: [{ id: "open", name: "Open", terminal: 0 }] }
+]) assert.throws(() => model.decodeCatalog(encodeCatalog({ ...catalog, ...change })), Error)
+
+const taskView = {
+  ...task, projects: ["work"], tags: ["Équipe/Été"], url: "https://example.test/task",
+  due_date: "2026-09-06", due_time: "09:30", recurrence: null, recurrence_from: null,
+  last_completed_date: null, body: "", extra_properties: {}
+}
+const listResult = { version: 1, tasks: [taskView] }
+assert.deepEqual(model.decodeInputResult(JSON.stringify(listResult), "list"), listResult)
+assert.deepEqual(model.decodeInputResult('{"version":1,"tasks":[]}', "list").tasks, [])
+const recurring = { ...taskView, recurrence: "FREQ=DAILY", recurrence_from: "schedule" }
+assert.equal(model.decodeInputResult(JSON.stringify({ version: 1, tasks: [recurring] }), "list").tasks[0].recurrence_from, "schedule")
+for (const change of [
+  { id: id.toLowerCase() }, { parent: undefined }, { due_time: "9:30" }, { due_date: null },
+  { due_date: "2026-02-30" }, { url: "https://bad.test:65536" }, { tags: ["a", "a"] },
+  { projects: "work" }, { body: null }, { extra_properties: [] },
+  { recurrence_from: "completion" }, { last_completed_date: "2026-09-05" }
+]) {
+  assert.throws(() => model.decodeInputResult(JSON.stringify({ version: 1, tasks: [{ ...taskView, ...change }] }), "list"), Error)
+}
+assert.throws(() => model.decodeInputResult(JSON.stringify({ version: 1, tasks: [taskView, taskView] }), "list"), Error)
+assert.throws(() => model.decodeInputResult(JSON.stringify({ version: 1, tasks: [task] }), "list"), Error)
+const syncResult = { version: 1, sync: { branch: "main", upstream: "origin/main", committed: true, conflicts_resolved: 2 } }
+assert.deepEqual(model.decodeInputResult(JSON.stringify(syncResult), "sync"), syncResult)
+for (const change of [{ branch: "" }, { upstream: null }, { committed: 1 }, { conflicts_resolved: -1 }, { conflicts_resolved: 0.5 }]) {
+  assert.throws(() => model.decodeInputResult(JSON.stringify({
+    ...syncResult, sync: { ...syncResult.sync, ...change }
+  }), "sync"), error => error.safeToRetry === false)
+}
+for (const malformed of ["", "{}", "null", '{"version":2,"sync":{}}', JSON.stringify({ ...syncResult, error: {} }), JSON.stringify(listResult)]) {
+  assert.throws(() => model.decodeInputResult(malformed, "sync"), error => error.safeToRetry === false)
+}
+assert.throws(() => model.decodeInputResult(JSON.stringify(syncResult), "list"), Error)
+
 const decodedError = model.decodeError(JSON.stringify({ version: 1, error: { code: "task_not_found", message: "Parent <missing>", path: "Tasks/file.md", field: "parent" } }))
 assert.ok(decodedError.includes("task_not_found"))
 assert.ok(decodedError.includes("Parent <missing>"))
@@ -77,6 +122,10 @@ assert.equal(model.decodeMutationError(encodeError("unsupported_schema"), 7).saf
 assert.equal(model.decodeMutationError(encodeError("schema_version_mismatch"), 7).safeToRetry, true)
 assert.equal(model.decodeMutationError(encodeError("concurrent_modification"), 6).safeToRetry, true)
 assert.equal(model.decodeMutationError(encodeError("unresolved_conflict"), 6).safeToRetry, true)
+for (const code of ["invalid_due_time", "due_time_requires_due_date", "invalid_url"]) {
+  assert.equal(model.decodeMutationError(encodeError(code), 5).safeToRetry, true)
+  assert.equal(model.decodeMutationError(encodeError(code), 0).safeToRetry, false)
+}
 for (const exitCode of [0, 5, 8, -1, "3", undefined]) {
   assert.equal(model.decodeMutationError(missingParent, exitCode).safeToRetry, false)
 }
