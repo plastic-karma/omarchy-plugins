@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "br.console",
+  "name": "JavaScript Console",
+  "version": "1.0.0",
+  "author": "br",
+  "description": "Unsandboxed JavaScript console in the Omarchy shell's QML engine",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Console.qml"
+  }
+}
